@@ -52,3 +52,22 @@ pub trait InOutFuncs {
     /// error message should be generated?
     const NULL_ERROR_MESSAGE: Option<&'static str> = None;
 }
+
+/// `#[derive(Serialize, Deserialize, PostgresType)]` types may implement this trait if they prefer
+/// a textual representation that isn't JSON and get the oid and typmod from postgres on the input
+/// function
+pub trait TypmodInOutFuncs {
+    /// Given a string representation of `Self`, parse it into `Self`.
+    ///
+    /// It is expected that malformed input will raise an `error!()` or `panic!()`
+    fn input(input: &core::ffi::CStr, oid: i32, typmod: i32) -> Self
+    where
+        Self: Sized;
+
+    /// Convert `Self` into text by writing to the supplied `StringInfo` buffer
+    fn output(&self, buffer: &mut StringInfo);
+
+    /// If PostgreSQL calls the conversion function with NULL as an argument, what
+    /// error message should be generated?
+    const NULL_ERROR_MESSAGE: Option<&'static str> = None;
+}
