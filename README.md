@@ -13,7 +13,7 @@
 
 `pgrx` is a framework for developing PostgreSQL extensions in Rust and strives to be as idiomatic and safe as possible.
 
-`pgrx` supports Postgres 12 through Postgres 16.
+`pgrx` supports Postgres 12 through Postgres 17.
 
 **Feel free to join our [Discord Server](https://discord.gg/PMrpdJsqcJ).**
 
@@ -72,9 +72,9 @@ those remain untested. So far, some of PGRX's build tooling works on Windows, bu
 
 - A Rust toolchain: `rustc`, `cargo`, and `rustfmt`. The recommended way to get these is from https://rustup.rs †
 - `git`
-- `libclang` 5.0 or greater (required by bindgen)
-   - Ubuntu: `apt install libclang-dev` or `apt install clang`
-   - RHEL: `yum install clang`
+- `libclang` 11 or greater (for bindgen)
+   - Debian-likes: `apt install libclang-dev` or `apt install clang`
+   - RHEL-likes: `yum install clang`
 - GCC 7 or newer
 - [PostgreSQL's build dependencies](https://wiki.postgresql.org/wiki/Compile_and_Install_from_source_code) ‡
    - Debian-likes: `sudo apt-get install build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache pkg-config`
@@ -84,39 +84,40 @@ those remain untested. So far, some of PGRX's build tooling works on Windows, bu
 
  ‡ A local PostgreSQL server installation is not required. `cargo pgrx` can download and compile PostgreSQL versions on its own.
 
- ⹋ PGRX has not been tested to work on 32-bit: the library assumes an 8-byte `pg_sys::Datum`
-which may result in unexpected behavior on 32-bit, like dropping 4 bytes of data from `int8`
-and `double`. This may not be "unsound" in itself, as it is "merely" illogical,
-but it may undermine otherwise-reasonable safety assumptions of PGRX extensions.
-We do not plan to add support without considerable ongoing technical and financial contributions.
+ ⹋ PGRX has not been tested to work on 32-bit, but the library attempts to handle conversion of `pg_sys::Datum`
+to and from `int8` and `double` types. Use it only for your own risk. We do not plan to add offical support
+without considerable ongoing technical and financial contributions.
 
-<details style="border: 1px solid; padding: 0.25em 0.5em 0;">
-   <summary><i>How to:</i> <b>GCC 7 on CentOS 7</b></summary>
+### macOS
 
-It is not recommended to use CentOS 7 for PGRX development, even if it works.
+Running PGRX on a Mac requires some additional setup.
 
-Recommended Linux distributions include recent Debian, Fedora, and Ubuntu.
+The Mac C compiler (clang) and related tools are bundled with [XCode](https://developer.apple.com/xcode/). 
+XCode can be installed from the Mac App Store.
 
-In order to use GCC 7, install [`scl`](https://wiki.centos.org/AdditionalResources/Repositories/SCL) and enter the GCC 7 development environment:
-
-```bash
-yum install centos-release-scl
-yum install devtoolset-7
-scl enable devtoolset-7 bash
-```
-</details>
-
-<details style="border: 1px solid; padding: 0.25em 0.5em 0;">
-   <summary><i>How to:</i> <b>Homebrew on macOS</b></summary>
-
-As macOS provides no package manager, it is recommended to use https://brew.sh for C dependencies.
-
-In particular, you will probably need these if you don't have them already:
+For additional C libraries, it's easiest to use [Homebrew](https://brew.sh/). In particular, 
+you will probably need these if you don't have them already:
 
 ```zsh
 brew install git icu4c pkg-config
 ```
-</details>
+The config script that Postgres 17 uses in its build process does not automatically detect 
+the Homebrew install directory. (Earlier versions of Postgres do not have this problem.) 
+You may see this error:
+
+```configure: error: ICU library not found```
+
+To fix it, run
+```
+export PKG_CONFIG_PATH=/opt/homebrew/opt/icu4c/lib/pkgconfig
+```
+on the command line before you run ```cargo pgrx init```
+
+Every once in a while, XCode will update itself and move the directory that contains
+the C compiler. When the Postgres ./config process runs during the build, it grabs the current directory
+and stores it, which means that there will be build errors if you do a full rebuild of your
+project and the old directory has disappeared. The solution is re-run `cargo pgrx init` so the
+Postgres installs get rebuilt.
 
 ## Getting Started
 

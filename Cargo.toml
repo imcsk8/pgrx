@@ -7,7 +7,7 @@
 #LICENSE All rights reserved.
 #LICENSE
 #LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
- 
+
 [workspace]
 resolver = "2"
 members = [
@@ -18,7 +18,10 @@ members = [
     "pgrx-pg-sys",
     "pgrx-sql-entity-graph",
     "pgrx-tests",
-    "pgrx-version-updater",
+    "pgrx-bindgen",
+]
+exclude = [
+    # "pgrx-examples/*",
     "pgrx-examples/aggregate",
     "pgrx-examples/arrays",
     "pgrx-examples/bad_ideas",
@@ -29,6 +32,7 @@ members = [
     "pgrx-examples/custom_types",
     "pgrx-examples/custom_sql",
     "pgrx-examples/datetime",
+    "pgrx-examples/wal_decoder",
     "pgrx-examples/errors",
     "pgrx-examples/nostd",
     "pgrx-examples/numeric",
@@ -38,12 +42,12 @@ members = [
     "pgrx-examples/schemas",
     "pgrx-examples/shmem",
     "pgrx-examples/spi",
+    "pgrx-examples/spi_srf",
     "pgrx-examples/srf",
     "pgrx-examples/strings",
     "pgrx-examples/triggers",
     "pgrx-examples/versioned_custom_libname_so",
     "pgrx-examples/versioned_so",
-    "pgrx-examples/spi_srf",
 ]
 
 
@@ -51,10 +55,11 @@ members = [
 cargo-pgrx = { path = "cargo-pgrx" }
 
 [workspace.dependencies]
-pgrx-macros = { path = "./pgrx-macros", version = "=0.12.0-beta.3" }
-pgrx-pg-sys = { path = "./pgrx-pg-sys", version = "=0.12.0-beta.3" }
-pgrx-sql-entity-graph = { path = "./pgrx-sql-entity-graph", version = "=0.12.0-beta.3" }
-pgrx-pg-config = { path = "./pgrx-pg-config", version = "=0.12.0-beta.3" }
+pgrx-macros = { path = "./pgrx-macros", version = "=0.12.4" }
+pgrx-pg-sys = { path = "./pgrx-pg-sys", version = "=0.12.4" }
+pgrx-sql-entity-graph = { path = "./pgrx-sql-entity-graph", version = "=0.12.4" }
+pgrx-pg-config = { path = "./pgrx-pg-config", version = "=0.12.4" }
+pgrx-bindgen = { path = "./pgrx-bindgen", version = "0.12.4" }
 
 cargo_metadata = "0.18.0"
 cargo-edit = "0.12.2" # format-preserving edits to cargo.toml

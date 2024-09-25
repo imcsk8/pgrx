@@ -13,9 +13,10 @@
 #![allow(clippy::redundant_closure)] // extra closures are easier to refactor
 #![allow(clippy::iter_nth_zero)] // can be easier to refactor
 #![allow(clippy::perf)] // not a priority here
+use cargo_toml::Manifest;
 use clap::{Args, Parser, Subcommand};
 use owo_colors::OwoColorize;
-use std::collections::HashSet;
+use rustc_hash::{FxHashSet, FxHashSet as HashSet};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -130,14 +131,43 @@ fn query_toml(query_args: &QueryCargoVersionArgs) {
 }
 
 fn update_files(args: &UpdateFilesArgs) {
+    // We operate on a workspace. Assume we are being run from the workspace root or its children,
+    // and roll back to the nearest toml with a workspace.
     let current_dir = env::current_dir().expect("Could not get current directory!");
+    let workspace_manifest_parent = current_dir
+        .ancestors()
+        .find(|path| {
+            Manifest::from_path(path.join("Cargo.toml"))
+                .ok()
+                .filter(|manifest| manifest.workspace.is_some())
+                .is_some()
+        })
+        .unwrap();
+    let workspace_manifest =
+        Manifest::from_path(workspace_manifest_parent.join("Cargo.toml")).unwrap();
+    let Some(workspace) = workspace_manifest.workspace else { unreachable!() };
+
+    // We specifically want to update the version to anything that has a version-dependency on a workspace member
 
     // Contains a set of package names (e.g. "pgrx", "pgrx-pg-sys") that will be used
     // to search for updatable dependencies later on
-    let mut updatable_package_names = HashSet::new();
+    let updatable_package_names = workspace
+        .members
+        .iter()
+        .map(|s| {
+            let package_path = workspace_manifest_parent.join(format!("{s}/Cargo.toml"));
+            Ok(Manifest::from_path(package_path)?
+                .package
+                .ok_or_else(|| {
+                    cargo_toml::Error::Other("expected package field in workspace member")
+                })?
+                .name)
+        })
+        .collect::<Result<FxHashSet<String>, cargo_toml::Error>>()
+        .unwrap();
 
     // This will eventually contain every file we want to process
-    let mut files_to_process = HashSet::new();
+    let mut files_to_process = HashSet::default();
 
     // Keep track of which files to exclude from a "package version" change.
     // For example, some Cargo.toml files do not need this updated:
@@ -147,7 +177,7 @@ fn update_files(args: &UpdateFilesArgs) {
     // Any such file is explicitly added via a command line argument.
     // Note that any files included here are still eligible to be processed for
     // *dependency* version updates.
-    let mut exclude_version_files = HashSet::new();
+    let mut exclude_version_files = HashSet::default();
     for file in &args.exclude_from_version_change {
         exclude_version_files.insert(
             fullpath(file).expect(format!("Could not get full path for file: {file}").as_str()),
@@ -165,28 +195,11 @@ fn update_files(args: &UpdateFilesArgs) {
                 format!("Could not get full path for file {}", entry.path().display()).as_str(),
             );
 
-            let mut output = format!(
+            let output = format!(
                 "{} Cargo.toml file at {}",
                 "Discovered".bold().green(),
                 filepath.display().cyan()
             );
-
-            // Extract the package name if possible
-            if !exclude_version_files.contains(&filepath) {
-                match extract_package_name(&filepath) {
-                    Some(package_name) => {
-                        updatable_package_names.insert(package_name);
-                    }
-                    None => {
-                        output.push_str(
-                            "\n           * Could not determine package name due to [package] not existing -- skipping version bump."
-                                .dimmed()
-                                .to_string()
-                                .as_str(),
-                        )
-                    }
-                }
-            }
 
             if args.verbose {
                 println!("{output}");
@@ -201,28 +214,11 @@ fn update_files(args: &UpdateFilesArgs) {
         let filepath =
             fullpath(file).expect(format!("Could not get full path for file {file}").as_str());
 
-        let mut output = format!(
+        let output = format!(
             "{} Cargo.toml file at {} for processing",
             " Including".bold().green(),
             filepath.display().cyan()
         );
-
-        // Extract the package name if possible
-        if !exclude_version_files.contains(&filepath) {
-            match extract_package_name(&filepath) {
-                Some(package_name) => {
-                    updatable_package_names.insert(package_name);
-                }
-                None => {
-                    output.push_str(
-                        "\n           * Could not determine package name due to [package] not existing -- skipping version bump."
-                            .dimmed()
-                            .to_string()
-                            .as_str(),
-                    )
-                }
-            }
-        }
 
         if args.verbose {
             println!("{output}");
@@ -280,34 +276,40 @@ fn update_files(args: &UpdateFilesArgs) {
             }
         };
 
+        let table_names = ["dependencies", "build-dependencies", "dev-dependencies"];
+        // jubilee: You CAN have workspace dependencies and normal dependencies in a Cargo.toml
+        // but I just got this code working and I don't want to write the flat_map right now.
+        // I'll take care of it when we actually do something like that.
+        let ws_or_doc =
+            if let Some(ws) = doc.get_mut("workspace") { ws } else { doc.as_item_mut() }
+                .as_table_mut()
+                .unwrap();
+        let table_iter = ws_or_doc.iter_mut().filter(|(k, _)| table_names.contains(&k.get()));
+
         // Process dependencies in each file. Generally dependencies can be found in
         // [dependencies], [dependencies.foo], [build-dependencies], [dev-dependencies]
-        for updatable_table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-            if let Some(updatable_table) =
-                doc.get_mut(updatable_table_name).and_then(|i| i.as_table_mut())
-            {
-                for package in &updatable_package_names {
-                    // Tables can contain other tables, and if that's the case we're
-                    // probably at a case of a table like this:
-                    //   [dependencies.pgrx]
-                    //   version = "1.2.3"
-                    // or an inline table:
-                    //   [dependencies]
-                    //   pgrx = { version = "1.2.3", features = ["..."] }
-                    // so we attempt to drill into a dyn TableLike with that entry
-                    if let Some(Entry::Occupied(key_version)) = updatable_table
-                        .get_mut(package)
-                        .and_then(|t| Some(t.as_table_like_mut()?.entry("version")))
-                    {
-                        update_package_version(key_version.into_mut());
-                    }
-                    // Otherwise we are a string, such as:
-                    //   [dependencies]
-                    //   pgrx = "0.1.2"
-                    else if let Some(item) = updatable_table.get_mut(package) {
-                        update_package_version(item)
-                    };
+        for (_, table_v) in table_iter {
+            for package in &updatable_package_names {
+                // Tables can contain other tables, and if that's the case we're
+                // probably at a case of a table like this:
+                //   [dependencies.pgrx]
+                //   version = "1.2.3"
+                // or an inline table:
+                //   [dependencies]
+                //   pgrx = { version = "1.2.3", features = ["..."] }
+                // so we attempt to drill into a dyn TableLike with that entry
+                if let Some(Entry::Occupied(key_version)) = table_v
+                    .get_mut(package)
+                    .and_then(|t| Some(t.as_table_like_mut()?.entry("version")))
+                {
+                    update_package_version(key_version.into_mut());
                 }
+                // Otherwise we are a string, such as:
+                //   [dependencies]
+                //   pgrx = "0.1.2"
+                else if let Some(item) = table_v.get_mut(package) {
+                    update_package_version(item)
+                };
             }
         }
 
@@ -428,7 +430,7 @@ fn parse_new_version(current_version_specifier: &str, new_version: &str) -> Stri
     match current_version_specifier.chars().nth(0) {
         // If first character is numeric, then we have just a version specified,
         // such as "0.5.2" or "4.15.0"
-        Some(c) if c.is_numeric() => result.push_str(current_version_specifier),
+        Some(c) if c.is_numeric() => result.push_str(new_version),
 
         // Otherwise, we have a specifier such as "=0.5.2" or "~0.4.6" or ">= 1.2.0"
         // Extract out the non-numeric prefix and join it with the new version to
@@ -449,19 +451,4 @@ fn parse_new_version(current_version_specifier: &str, new_version: &str) -> Stri
     }
 
     result
-}
-
-// Given a filepath pointing to a Cargo.toml file, extract out the [package] name
-// if it has one
-fn extract_package_name<P: AsRef<Path>>(filepath: P) -> Option<String> {
-    let filepath = filepath.as_ref();
-
-    let data = fs::read_to_string(filepath)
-        .expect(format!("Unable to open file at {}", filepath.display()).as_str());
-
-    let doc = data.parse::<DocumentMut>().expect(
-        format!("File at location {} is an invalid Cargo.toml file", filepath.display()).as_str(),
-    );
-
-    doc.get("package")?.as_table()?.get("name")?.as_str().map(|s| s.to_string())
 }

@@ -1,9 +1,10 @@
-use std::ffi::CString;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::pg_sys::{self, PgOid};
 use crate::spi::{PreparedStatement, Query, Spi, SpiCursor, SpiError, SpiResult, SpiTupleTable};
+
+use super::query::PreparableQuery;
 
 // TODO: should `'conn` be invariant?
 pub struct SpiClient<'conn> {
@@ -12,61 +13,21 @@ pub struct SpiClient<'conn> {
 
 impl<'conn> SpiClient<'conn> {
     /// Prepares a statement that is valid for the lifetime of the client
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the supplied `query` string contained a NULL byte
-    pub fn prepare(
+    pub fn prepare<Q: PreparableQuery<'conn>>(
         &self,
-        query: &str,
+        query: Q,
         args: Option<Vec<PgOid>>,
     ) -> SpiResult<PreparedStatement<'conn>> {
-        self.make_prepare_statement(query, args, false)
+        query.prepare(self, args)
     }
 
     /// Prepares a mutating statement that is valid for the lifetime of the client
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the supplied `query` string contained a NULL byte
-    pub fn prepare_mut(
+    pub fn prepare_mut<Q: PreparableQuery<'conn>>(
         &self,
-        query: &str,
+        query: Q,
         args: Option<Vec<PgOid>>,
     ) -> SpiResult<PreparedStatement<'conn>> {
-        self.make_prepare_statement(query, args, true)
-    }
-
-    fn make_prepare_statement(
-        &self,
-        query: &str,
-        args: Option<Vec<PgOid>>,
-        mutating: bool,
-    ) -> SpiResult<PreparedStatement<'conn>> {
-        let src = CString::new(query).expect("query contained a null byte");
-        let args = args.unwrap_or_default();
-        let nargs = args.len();
-
-        // SAFETY: all arguments are prepared above
-        let plan = unsafe {
-            pg_sys::SPI_prepare(
-                src.as_ptr(),
-                nargs as i32,
-                args.into_iter().map(PgOid::value).collect::<Vec<_>>().as_mut_ptr(),
-            )
-        };
-        Ok(PreparedStatement {
-            plan: NonNull::new(plan).ok_or_else(|| {
-                Spi::check_status(unsafe {
-                    // SAFETY: no concurrent usage
-                    pg_sys::SPI_result
-                })
-                .err()
-                .unwrap()
-            })?,
-            __marker: PhantomData,
-            mutating,
-        })
+        query.prepare_mut(self, args)
     }
 
     /// perform a SELECT statement
@@ -117,8 +78,27 @@ impl<'conn> SpiClient<'conn> {
     /// Rows may be then fetched using [`SpiCursor::fetch`].
     ///
     /// See [`SpiCursor`] docs for usage details.
+    ///
+    /// See [`try_open_cursor`][Self::try_open_cursor] which will return an [`SpiError`] rather than panicking.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a cursor wasn't opened.
     pub fn open_cursor<Q: Query<'conn>>(&self, query: Q, args: Q::Arguments) -> SpiCursor<'conn> {
-        query.open_cursor(self, args)
+        self.try_open_cursor(query, args).unwrap()
+    }
+
+    /// Set up a cursor that will execute the specified query
+    ///
+    /// Rows may be then fetched using [`SpiCursor::fetch`].
+    ///
+    /// See [`SpiCursor`] docs for usage details.
+    pub fn try_open_cursor<Q: Query<'conn>>(
+        &self,
+        query: Q,
+        args: Q::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        query.try_open_cursor(self, args)
     }
 
     /// Set up a cursor that will execute the specified update (mutating) query
@@ -126,13 +106,33 @@ impl<'conn> SpiClient<'conn> {
     /// Rows may be then fetched using [`SpiCursor::fetch`].
     ///
     /// See [`SpiCursor`] docs for usage details.
+    ///
+    /// See [`try_open_cursor_mut`][Self::try_open_cursor_mut] which will return an [`SpiError`] rather than panicking.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a cursor wasn't opened.
     pub fn open_cursor_mut<Q: Query<'conn>>(
         &mut self,
         query: Q,
         args: Q::Arguments,
     ) -> SpiCursor<'conn> {
         Spi::mark_mutable();
-        query.open_cursor(self, args)
+        self.try_open_cursor_mut(query, args).unwrap()
+    }
+
+    /// Set up a cursor that will execute the specified update (mutating) query
+    ///
+    /// Rows may be then fetched using [`SpiCursor::fetch`].
+    ///
+    /// See [`SpiCursor`] docs for usage details.
+    pub fn try_open_cursor_mut<Q: Query<'conn>>(
+        &mut self,
+        query: Q,
+        args: Q::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        Spi::mark_mutable();
+        query.try_open_cursor(self, args)
     }
 
     /// Find a cursor in transaction by name

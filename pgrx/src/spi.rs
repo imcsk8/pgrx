@@ -9,7 +9,9 @@
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
 //! Safe access to Postgres' *Server Programming Interface* (SPI).
 
-use crate::{pg_sys, FromDatum, IntoDatum, Json, PgOid, TryFromDatumError};
+use crate::datum::{FromDatum, IntoDatum, Json, TryFromDatumError};
+use crate::pg_sys;
+use crate::PgOid;
 use core::fmt::Formatter;
 use std::ffi::{CStr, CString};
 use std::fmt::Debug;
@@ -78,7 +80,7 @@ pub enum SpiErrorCodes {
 
 impl std::fmt::Display for SpiErrorCodes {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_fmt(format_args!("{:?}", self))
+        write!(f, "{self:?}")
     }
 }
 

@@ -14,6 +14,8 @@ mod anynumeric_tests;
 mod array_tests;
 mod attributes_tests;
 mod bgworker_tests;
+#[cfg(feature = "cshim")]
+mod bindings_of_inline_fn_tests;
 mod bytea_tests;
 mod cfg_tests;
 mod complex;
@@ -51,6 +53,7 @@ mod postgres_type_tests;
 #[cfg(feature = "proptest")]
 mod proptests;
 mod range_tests;
+mod rel_tests;
 mod result_tests;
 mod roundtrip_tests;
 mod schema_tests;

@@ -47,7 +47,7 @@ INCLUDE_FOR_DEP_UPDATES=(
 # versions bumped at release time.
 EXCLUDE_FROM_VERSION_BUMP=(
   'cargo-pgrx/src/templates/cargo_toml'
-  'pgrx-version-updater/Cargo.toml'
+  'tools/version-updater/Cargo.toml'
 )
 
 # Exclude all pgrx-examples Cargo.toml files from version bumping
@@ -56,7 +56,7 @@ for file in pgrx-examples/**/Cargo.toml; do
 done
 
 # shellcheck disable=SC2086,SC2068
-cargo run --bin pgrx-version-updater \
+cargo run --manifest-path=./tools/version-updater/Cargo.toml \
   update-files \
   --update-version "$VERSION" \
   ${INCLUDE_FOR_DEP_UPDATES[@]/#/-i } \
@@ -64,10 +64,8 @@ cargo run --bin pgrx-version-updater \
   ${VERBOSE:+--show-diff} \
   ${VERBOSE:+--verbose}
 
-echo "Upgrading dependency versions"
-./upgrade-deps.sh
 
 echo "Generating bindings -- this may take a few moments"
-PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE=1 cargo test --no-run $CARGO_QUIET_FLAG --workspace --no-default-features --features "pg14"
+PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE=1 cargo test --no-run $CARGO_QUIET_FLAG --workspace --no-default-features --features "pg${PG_VER:-14}"
 
 echo "Done!"

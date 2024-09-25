@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -13,43 +13,112 @@ use crate::pg_sys::{self, PgOid};
 /// Its primary purpose is to abstract away differences between
 /// one-off statements and prepared statements, but it can potentially
 /// be implemented for other types, provided they can be converted into a query.
-pub trait Query<'conn> {
+pub trait Query<'conn>: Sized {
     type Arguments;
 
-    /// Execute a query given a client and other arguments
+    /// Execute a query given a client and other arguments.
     fn execute(
         self,
         client: &SpiClient<'conn>,
         limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
+        args: Self::Arguments,
     ) -> SpiResult<SpiTupleTable<'conn>>;
 
-    /// Open a cursor for the query
-    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn>;
-}
+    /// Open a cursor for the query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a cursor wasn't opened.
+    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
+        self.try_open_cursor(client, args).unwrap()
+    }
 
-impl<'conn> Query<'conn> for &String {
-    type Arguments = Option<Vec<(PgOid, Option<pg_sys::Datum>)>>;
-
-    fn execute(
+    /// Tries to open cursor for the query.
+    fn try_open_cursor(
         self,
         client: &SpiClient<'conn>,
-        limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
-    ) -> SpiResult<SpiTupleTable<'conn>> {
-        self.as_str().execute(client, limit, arguments)
-    }
-
-    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        self.as_str().open_cursor(client, args)
-    }
+        args: Self::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>>;
 }
 
-fn prepare_datum(datum: Option<pg_sys::Datum>) -> (pg_sys::Datum, std::os::raw::c_char) {
-    match datum {
-        Some(datum) => (datum, ' ' as std::os::raw::c_char),
-        None => (pg_sys::Datum::from(0usize), 'n' as std::os::raw::c_char),
+/// A trait representing a query which can be prepared.
+pub trait PreparableQuery<'conn>: Query<'conn> {
+    /// Prepares a query.
+    fn prepare(
+        self,
+        client: &SpiClient<'conn>,
+        args: Option<Vec<PgOid>>,
+    ) -> SpiResult<PreparedStatement<'conn>>;
+
+    /// Prepares a query allowed to change data
+    fn prepare_mut(
+        self,
+        client: &SpiClient<'conn>,
+        args: Option<Vec<PgOid>>,
+    ) -> SpiResult<PreparedStatement<'conn>>;
+}
+
+fn execute<'conn>(
+    cmd: &CStr,
+    args: Option<Vec<(PgOid, Option<pg_sys::Datum>)>>,
+    limit: Option<libc::c_long>,
+) -> SpiResult<SpiTupleTable<'conn>> {
+    // SAFETY: no concurrent access
+    unsafe {
+        pg_sys::SPI_tuptable = std::ptr::null_mut();
     }
+
+    let status_code = match args {
+        Some(args) => {
+            let nargs = args.len();
+            let (mut argtypes, mut datums, nulls) = args_to_datums(args);
+
+            // SAFETY: arguments are prepared above
+            unsafe {
+                pg_sys::SPI_execute_with_args(
+                    cmd.as_ptr(),
+                    nargs as i32,
+                    argtypes.as_mut_ptr(),
+                    datums.as_mut_ptr(),
+                    nulls.as_ptr(),
+                    Spi::is_xact_still_immutable(),
+                    limit.unwrap_or(0),
+                )
+            }
+        }
+        // SAFETY: arguments are prepared above
+        None => unsafe {
+            pg_sys::SPI_execute(cmd.as_ptr(), Spi::is_xact_still_immutable(), limit.unwrap_or(0))
+        },
+    };
+
+    SpiClient::prepare_tuple_table(status_code)
+}
+
+fn open_cursor<'conn>(
+    cmd: &CStr,
+    args: Option<Vec<(PgOid, Option<pg_sys::Datum>)>>,
+) -> SpiResult<SpiCursor<'conn>> {
+    let args = args.unwrap_or_default();
+    let nargs = args.len();
+    let (mut argtypes, mut datums, nulls) = args_to_datums(args);
+
+    let ptr = unsafe {
+        // SAFETY: arguments are prepared above and SPI_cursor_open_with_args will never return
+        // the null pointer.  It'll raise an ERROR if something is invalid for it to create the cursor
+        NonNull::new_unchecked(pg_sys::SPI_cursor_open_with_args(
+            std::ptr::null_mut(), // let postgres assign a name
+            cmd.as_ptr(),
+            nargs as i32,
+            argtypes.as_mut_ptr(),
+            datums.as_mut_ptr(),
+            nulls.as_ptr(),
+            Spi::is_xact_still_immutable(),
+            0,
+        ))
+    };
+
+    Ok(SpiCursor { ptr, __marker: PhantomData })
 }
 
 fn args_to_datums(
@@ -70,79 +139,101 @@ fn args_to_datums(
     (argtypes, datums, nulls)
 }
 
-impl<'conn> Query<'conn> for &str {
-    type Arguments = Option<Vec<(PgOid, Option<pg_sys::Datum>)>>;
-
-    /// # Panics
-    ///
-    /// This function will panic if somehow the specified query contains a null byte.
-    fn execute(
-        self,
-        _client: &SpiClient<'conn>,
-        limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
-    ) -> SpiResult<SpiTupleTable<'conn>> {
-        // SAFETY: no concurrent access
-        unsafe {
-            pg_sys::SPI_tuptable = std::ptr::null_mut();
-        }
-
-        let src = CString::new(self).expect("query contained a null byte");
-        let status_code = match arguments {
-            Some(args) => {
-                let nargs = args.len();
-                let (mut argtypes, mut datums, nulls) = args_to_datums(args);
-
-                // SAFETY: arguments are prepared above
-                unsafe {
-                    pg_sys::SPI_execute_with_args(
-                        src.as_ptr(),
-                        nargs as i32,
-                        argtypes.as_mut_ptr(),
-                        datums.as_mut_ptr(),
-                        nulls.as_ptr(),
-                        Spi::is_xact_still_immutable(),
-                        limit.unwrap_or(0),
-                    )
-                }
-            }
-            // SAFETY: arguments are prepared above
-            None => unsafe {
-                pg_sys::SPI_execute(
-                    src.as_ptr(),
-                    Spi::is_xact_still_immutable(),
-                    limit.unwrap_or(0),
-                )
-            },
-        };
-
-        SpiClient::prepare_tuple_table(status_code)
-    }
-
-    fn open_cursor(self, _client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        let src = CString::new(self).expect("query contained a null byte");
-        let args = args.unwrap_or_default();
-
-        let nargs = args.len();
-        let (mut argtypes, mut datums, nulls) = args_to_datums(args);
-
-        let ptr = unsafe {
-            // SAFETY: arguments are prepared above and SPI_cursor_open_with_args will never return
-            // the null pointer.  It'll raise an ERROR if something is invalid for it to create the cursor
-            NonNull::new_unchecked(pg_sys::SPI_cursor_open_with_args(
-                std::ptr::null_mut(), // let postgres assign a name
-                src.as_ptr(),
-                nargs as i32,
-                argtypes.as_mut_ptr(),
-                datums.as_mut_ptr(),
-                nulls.as_ptr(),
-                Spi::is_xact_still_immutable(),
-                0,
-            ))
-        };
-        SpiCursor { ptr, __marker: PhantomData }
+fn prepare_datum(datum: Option<pg_sys::Datum>) -> (pg_sys::Datum, std::os::raw::c_char) {
+    match datum {
+        Some(datum) => (datum, ' ' as std::os::raw::c_char),
+        None => (pg_sys::Datum::from(0usize), 'n' as std::os::raw::c_char),
     }
 }
+
+fn prepare<'conn>(
+    cmd: &CStr,
+    args: Option<Vec<PgOid>>,
+    mutating: bool,
+) -> SpiResult<PreparedStatement<'conn>> {
+    let args = args.unwrap_or_default();
+
+    // SAFETY: all arguments are prepared above
+    let plan = unsafe {
+        pg_sys::SPI_prepare(
+            cmd.as_ptr(),
+            args.len() as i32,
+            args.into_iter().map(PgOid::value).collect::<Vec<_>>().as_mut_ptr(),
+        )
+    };
+    Ok(PreparedStatement {
+        plan: NonNull::new(plan).ok_or_else(|| {
+            Spi::check_status(unsafe {
+                // SAFETY: no concurrent usage
+                pg_sys::SPI_result
+            })
+            .err()
+            .unwrap()
+        })?,
+        __marker: PhantomData,
+        mutating,
+    })
+}
+
+macro_rules! impl_prepared_query {
+    ($t:ident, $s:ident) => {
+        impl<'conn> Query<'conn> for &$t {
+            type Arguments = Option<Vec<(PgOid, Option<pg_sys::Datum>)>>;
+
+            #[inline]
+            fn execute(
+                self,
+                _client: &SpiClient<'conn>,
+                limit: Option<libc::c_long>,
+                args: Self::Arguments,
+            ) -> SpiResult<SpiTupleTable<'conn>> {
+                execute($s(self).as_ref(), args, limit)
+            }
+
+            #[inline]
+            fn try_open_cursor(
+                self,
+                _client: &SpiClient<'conn>,
+                args: Self::Arguments,
+            ) -> SpiResult<SpiCursor<'conn>> {
+                open_cursor($s(self).as_ref(), args)
+            }
+        }
+
+        impl<'conn> PreparableQuery<'conn> for &$t {
+            fn prepare(
+                self,
+                _client: &SpiClient<'conn>,
+                args: Option<Vec<PgOid>>,
+            ) -> SpiResult<PreparedStatement<'conn>> {
+                prepare($s(self).as_ref(), args, false)
+            }
+
+            fn prepare_mut(
+                self,
+                _client: &SpiClient<'conn>,
+                args: Option<Vec<PgOid>>,
+            ) -> SpiResult<PreparedStatement<'conn>> {
+                prepare($s(self).as_ref(), args, true)
+            }
+        }
+    };
+}
+
+#[inline]
+fn pass_as_is<T>(s: T) -> T {
+    s
+}
+
+#[inline]
+fn pass_with_conv<T: AsRef<str>>(s: T) -> CString {
+    CString::new(s.as_ref()).expect("query contained a null byte")
+}
+
+impl_prepared_query!(CStr, pass_as_is);
+impl_prepared_query!(CString, pass_as_is);
+impl_prepared_query!(String, pass_with_conv);
+impl_prepared_query!(str, pass_with_conv);
 
 /// Client lifetime-bound prepared statement
 pub struct PreparedStatement<'conn> {
@@ -177,13 +268,17 @@ impl<'conn> Query<'conn> for &OwnedPreparedStatement {
         self,
         client: &SpiClient<'conn>,
         limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
+        args: Self::Arguments,
     ) -> SpiResult<SpiTupleTable<'conn>> {
-        (&self.0).execute(client, limit, arguments)
+        (&self.0).execute(client, limit, args)
     }
 
-    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        (&self.0).open_cursor(client, args)
+    fn try_open_cursor(
+        self,
+        client: &SpiClient<'conn>,
+        args: Self::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        (&self.0).try_open_cursor(client, args)
     }
 }
 
@@ -194,13 +289,17 @@ impl<'conn> Query<'conn> for OwnedPreparedStatement {
         self,
         client: &SpiClient<'conn>,
         limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
+        args: Self::Arguments,
     ) -> SpiResult<SpiTupleTable<'conn>> {
-        (&self.0).execute(client, limit, arguments)
+        (&self.0).execute(client, limit, args)
     }
 
-    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        (&self.0).open_cursor(client, args)
+    fn try_open_cursor(
+        self,
+        client: &SpiClient<'conn>,
+        args: Self::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        (&self.0).try_open_cursor(client, args)
     }
 }
 
@@ -221,6 +320,22 @@ impl<'conn> PreparedStatement<'conn> {
             mutating: self.mutating,
         })
     }
+
+    fn args_to_datums(
+        &self,
+        args: <Self as Query<'conn>>::Arguments,
+    ) -> SpiResult<(Vec<pg_sys::Datum>, Vec<std::os::raw::c_char>)> {
+        let args = args.unwrap_or_default();
+
+        let actual = args.len();
+        let expected = unsafe { pg_sys::SPI_getargcount(self.plan.as_ptr()) } as usize;
+
+        if expected == actual {
+            Ok(args.into_iter().map(prepare_datum).unzip())
+        } else {
+            Err(SpiError::PreparedStatementArgumentMismatch { expected, got: actual })
+        }
+    }
 }
 
 impl<'conn: 'stmt, 'stmt> Query<'conn> for &'stmt PreparedStatement<'conn> {
@@ -230,22 +345,14 @@ impl<'conn: 'stmt, 'stmt> Query<'conn> for &'stmt PreparedStatement<'conn> {
         self,
         _client: &SpiClient<'conn>,
         limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
+        args: Self::Arguments,
     ) -> SpiResult<SpiTupleTable<'conn>> {
         // SAFETY: no concurrent access
         unsafe {
             pg_sys::SPI_tuptable = std::ptr::null_mut();
         }
-        let args = arguments.unwrap_or_default();
-        let nargs = args.len();
 
-        let expected = unsafe { pg_sys::SPI_getargcount(self.plan.as_ptr()) } as usize;
-
-        if nargs != expected {
-            return Err(SpiError::PreparedStatementArgumentMismatch { expected, got: nargs });
-        }
-
-        let (mut datums, mut nulls): (Vec<_>, Vec<_>) = args.into_iter().map(prepare_datum).unzip();
+        let (mut datums, mut nulls) = self.args_to_datums(args)?;
 
         // SAFETY: all arguments are prepared above
         let status_code = unsafe {
@@ -261,10 +368,12 @@ impl<'conn: 'stmt, 'stmt> Query<'conn> for &'stmt PreparedStatement<'conn> {
         SpiClient::prepare_tuple_table(status_code)
     }
 
-    fn open_cursor(self, _client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        let args = args.unwrap_or_default();
-
-        let (mut datums, nulls): (Vec<_>, Vec<_>) = args.into_iter().map(prepare_datum).unzip();
+    fn try_open_cursor(
+        self,
+        _client: &SpiClient<'conn>,
+        args: Self::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        let (mut datums, nulls) = self.args_to_datums(args)?;
 
         // SAFETY: arguments are prepared above and SPI_cursor_open will never return the null
         // pointer.  It'll raise an ERROR if something is invalid for it to create the cursor
@@ -277,7 +386,7 @@ impl<'conn: 'stmt, 'stmt> Query<'conn> for &'stmt PreparedStatement<'conn> {
                 !self.mutating && Spi::is_xact_still_immutable(),
             ))
         };
-        SpiCursor { ptr, __marker: PhantomData }
+        Ok(SpiCursor { ptr, __marker: PhantomData })
     }
 }
 
@@ -288,12 +397,16 @@ impl<'conn> Query<'conn> for PreparedStatement<'conn> {
         self,
         client: &SpiClient<'conn>,
         limit: Option<libc::c_long>,
-        arguments: Self::Arguments,
+        args: Self::Arguments,
     ) -> SpiResult<SpiTupleTable<'conn>> {
-        (&self).execute(client, limit, arguments)
+        (&self).execute(client, limit, args)
     }
 
-    fn open_cursor(self, client: &SpiClient<'conn>, args: Self::Arguments) -> SpiCursor<'conn> {
-        (&self).open_cursor(client, args)
+    fn try_open_cursor(
+        self,
+        client: &SpiClient<'conn>,
+        args: Self::Arguments,
+    ) -> SpiResult<SpiCursor<'conn>> {
+        (&self).try_open_cursor(client, args)
     }
 }

@@ -60,6 +60,9 @@ pub(crate) struct Init {
     /// If installed locally, the path to PG16's `pgconfig` tool, or `download` to have pgrx download/compile/install it
     #[clap(env = "PG16_PG_CONFIG", long)]
     pg16: Option<String>,
+    /// If installed locally, the path to PG17's `pgconfig` tool, or `download` to have pgrx download/compile/install it
+    #[clap(env = "PG17_PG_CONFIG", long)]
+    pg17: Option<String>,
     #[clap(from_global, action = ArgAction::Count)]
     verbose: u8,
     #[clap(long, help = "Base port number")]
@@ -113,6 +116,9 @@ impl CommandExecute for Init {
         }
         if let Some(ref version) = self.pg16 {
             versions.insert("pg16", version.clone());
+        }
+        if let Some(ref version) = self.pg17 {
+            versions.insert("pg17", version.clone());
         }
 
         if versions.is_empty() {
@@ -402,8 +408,7 @@ fn configure_postgres(pg_config: &PgConfig, pgdir: &Path, init: &Init) -> eyre::
     let mut command = std::process::Command::new(configure_path);
     // Some of these are redundant with `--enable-debug`.
     let mut existing_cppflags = std::env::var("CPPFLAGS").unwrap_or_default();
-    existing_cppflags += " -DMEMORY_CONTEXT_CHECKING=1 \
-        -DCLOBBER_FREED_MEMORY=1 -DRANDOMIZE_ALLOCATED_MEMORY=1 ";
+    existing_cppflags += " -DUSE_ASSERT_CHECKING=1 -DRANDOMIZE_ALLOCATED_MEMORY=1 ";
     if init.valgrind {
         // `USE_VALGRIND` allows valgrind to understand PG's memory context
         // shenanigans. It requires Valgrind be installed (since it causes

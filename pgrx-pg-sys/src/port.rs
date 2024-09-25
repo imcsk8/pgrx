@@ -73,34 +73,45 @@ pub const unsafe fn MAXALIGN(len: usize) -> usize {
 ///
 /// [`palloc`]: crate::palloc
 #[allow(non_snake_case)]
-#[cfg(any(feature = "pg12", feature = "pg13", feature = "pg14", feature = "pg15"))]
 pub unsafe fn GetMemoryChunkContext(pointer: *mut std::os::raw::c_void) -> pg_sys::MemoryContext {
-    // Postgres versions <16 don't export the "GetMemoryChunkContext" function.  It's a "static inline"
-    // function in `memutils.h`, so we port it to Rust right here
-    /*
-     * Try to detect bogus pointers handed to us, poorly though we can.
-     * Presumably, a pointer that isn't MAXALIGNED isn't pointing at an
-     * allocated chunk.
-     */
-    assert!(!pointer.is_null());
-    assert_eq!(pointer, MAXALIGN(pointer as usize) as *mut ::std::os::raw::c_void);
+    #[cfg(any(feature = "pg12", feature = "pg13", feature = "pg14", feature = "pg15"))]
+    {
+        // Postgres versions <16 don't export the "GetMemoryChunkContext" function.  It's a "static inline"
+        // function in `memutils.h`, so we port it to Rust right here
+        /*
+         * Try to detect bogus pointers handed to us, poorly though we can.
+         * Presumably, a pointer that isn't MAXALIGNED isn't pointing at an
+         * allocated chunk.
+         */
+        assert!(!pointer.is_null());
+        assert_eq!(pointer, MAXALIGN(pointer as usize) as *mut ::std::os::raw::c_void);
 
-    /*
-     * OK, it's probably safe to look at the context.
-     */
-    // 	context = *(MemoryContext *) (((char *) pointer) - sizeof(void *));
-    let context = unsafe {
-        // SAFETY: the caller has assured us that `pointer` points to palloc'd memory, which
-        // means it'll have this header before it
-        *(pointer
-            .cast::<::std::os::raw::c_char>()
-            .sub(std::mem::size_of::<*mut ::std::os::raw::c_void>())
-            .cast())
-    };
+        /*
+         * OK, it's probably safe to look at the context.
+         */
+        // 	context = *(MemoryContext *) (((char *) pointer) - sizeof(void *));
+        let context = unsafe {
+            // SAFETY: the caller has assured us that `pointer` points to palloc'd memory, which
+            // means it'll have this header before it
+            *(pointer
+                .cast::<::std::os::raw::c_char>()
+                .sub(std::mem::size_of::<*mut ::std::os::raw::c_void>())
+                .cast())
+        };
 
-    assert!(MemoryContextIsValid(context));
+        assert!(MemoryContextIsValid(context));
 
-    context
+        context
+    }
+    #[cfg(any(feature = "pg16", feature = "pg17"))]
+    {
+        #[pgrx_macros::pg_guard]
+        extern "C" {
+            #[link_name = "GetMemoryChunkContext"]
+            pub fn extern_fn(pointer: *mut std::os::raw::c_void) -> pg_sys::MemoryContext;
+        }
+        extern_fn(pointer)
+    }
 }
 
 /// Returns true if memory context is tagged correctly according to Postgres.
@@ -137,8 +148,7 @@ pub const VARHDRSZ_SHORT: usize = offset_of!(super::varattrib_1b, va_data);
 
 #[inline]
 pub fn get_pg_major_version_string() -> &'static str {
-    let mver = core::ffi::CStr::from_bytes_with_nul(super::PG_MAJORVERSION).unwrap();
-    mver.to_str().unwrap()
+    super::PG_MAJORVERSION.to_str().unwrap()
 }
 
 #[inline]
@@ -148,14 +158,12 @@ pub fn get_pg_major_version_num() -> u16 {
 
 #[inline]
 pub fn get_pg_version_string() -> &'static str {
-    let ver = core::ffi::CStr::from_bytes_with_nul(super::PG_VERSION_STR).unwrap();
-    ver.to_str().unwrap()
+    super::PG_VERSION_STR.to_str().unwrap()
 }
 
 #[inline]
 pub fn get_pg_major_minor_version_string() -> &'static str {
-    let mver = core::ffi::CStr::from_bytes_with_nul(super::PG_VERSION).unwrap();
-    mver.to_str().unwrap()
+    super::PG_VERSION.to_str().unwrap()
 }
 
 #[inline]
@@ -296,7 +304,7 @@ extern "C" {
     ) -> bool;
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn planstate_tree_walker(
     planstate: *mut super::PlanState,
     walker: ::core::option::Option<
@@ -307,7 +315,7 @@ pub unsafe fn planstate_tree_walker(
     crate::planstate_tree_walker_impl(planstate, walker, context)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn query_tree_walker(
     query: *mut super::Query,
     walker: ::core::option::Option<
@@ -319,7 +327,7 @@ pub unsafe fn query_tree_walker(
     crate::query_tree_walker_impl(query, walker, context, flags)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn query_or_expression_tree_walker(
     node: *mut super::Node,
     walker: ::core::option::Option<
@@ -331,7 +339,7 @@ pub unsafe fn query_or_expression_tree_walker(
     crate::query_or_expression_tree_walker_impl(node, walker, context, flags)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn expression_tree_walker(
     node: *mut crate::Node,
     walker: Option<unsafe extern "C" fn(*mut crate::Node, *mut ::core::ffi::c_void) -> bool>,
@@ -340,7 +348,7 @@ pub unsafe fn expression_tree_walker(
     crate::expression_tree_walker_impl(node, walker, context)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn range_table_entry_walker(
     rte: *mut super::RangeTblEntry,
     walker: ::core::option::Option<
@@ -352,7 +360,7 @@ pub unsafe fn range_table_entry_walker(
     crate::range_table_entry_walker_impl(rte, walker, context, flags)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn range_table_walker(
     rtable: *mut super::List,
     walker: ::core::option::Option<
@@ -364,7 +372,7 @@ pub unsafe fn range_table_walker(
     crate::range_table_walker_impl(rtable, walker, context, flags)
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub unsafe fn raw_expression_tree_walker(
     node: *mut crate::Node,
     walker: Option<unsafe extern "C" fn(*mut crate::Node, *mut ::core::ffi::c_void) -> bool>,

@@ -49,6 +49,7 @@ pub mod fn_call;
 pub mod guc;
 pub mod heap_tuple;
 #[cfg(feature = "cshim")]
+#[allow(deprecated)]
 pub mod hooks;
 pub mod htup;
 pub mod inoutfuncs;
@@ -86,15 +87,18 @@ mod toast;
 pub use aggregate::*;
 pub use atomics::*;
 pub use callbacks::*;
-pub use datum::*;
+pub use datum::{
+    numeric, AnyArray, AnyElement, AnyNumeric, Array, FromDatum, Inet, Internal, IntoDatum, Json,
+    JsonB, Numeric, Range, Uuid, VariadicArray,
+};
 pub use enum_helper::*;
 pub use fcinfo::*;
 pub use guc::*;
 #[cfg(feature = "cshim")]
+#[allow(deprecated)]
 pub use hooks::*;
 pub use htup::*;
 pub use inoutfuncs::*;
-pub use itemptr::*;
 #[cfg(feature = "cshim")]
 pub use list::old_list::*;
 pub use lwlock::*;
@@ -140,16 +144,20 @@ mod seal {
 // that we're trying to be built against some other kind of "postgres" that has its own ABI name.
 //
 // Unless the compiling user explicitly told us that they're aware of this via `--features unsafe-postgres`.
-#[cfg(all(any(feature = "pg15", feature = "pg16"), not(feature = "unsafe-postgres")))]
+#[cfg(all(
+    any(feature = "pg15", feature = "pg16", feature = "pg17"),
+    not(feature = "unsafe-postgres")
+))]
 const _: () = {
+    use core::ffi::CStr;
     // to appease `const`
-    const fn same_slice(a: &[u8], b: &[u8]) -> bool {
-        if a.len() != b.len() {
+    const fn same_cstr(a: &CStr, b: &CStr) -> bool {
+        if a.to_bytes().len() != b.to_bytes().len() {
             return false;
         }
         let mut i = 0;
-        while i < a.len() {
-            if a[i] != b[i] {
+        while i < a.to_bytes().len() {
+            if a.to_bytes()[i] != b.to_bytes()[i] {
                 return false;
             }
             i += 1;
@@ -157,7 +165,7 @@ const _: () = {
         true
     }
     assert!(
-        same_slice(pg_sys::FMGR_ABI_EXTRA, b"PostgreSQL\0"),
+        same_cstr(pg_sys::FMGR_ABI_EXTRA, c"PostgreSQL"),
         "Unsupported Postgres ABI. Perhaps you need `--features unsafe-postgres`?",
     );
 };
@@ -235,15 +243,15 @@ macro_rules! pg_magic_func {
                 #[cfg(feature = "pg12")]
                 float4byval: ::pgrx::pg_sys::USE_FLOAT4_BYVAL as i32,
                 float8byval: cfg!(target_pointer_width = "64") as i32,
-                #[cfg(any(feature = "pg15", feature = "pg16"))]
+                #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
                 abi_extra: {
                     // we'll use what the bindings tell us, but if it ain't "PostgreSQL" then we'll
                     // raise a compilation error unless the `unsafe-postgres` feature is set
-                    let magic = ::pgrx::pg_sys::FMGR_ABI_EXTRA;
+                    let magic = ::pgrx::pg_sys::FMGR_ABI_EXTRA.to_bytes_with_nul();
                     let mut abi = [0 as ::pgrx::ffi::c_char; 32];
                     let mut i = 0;
                     while i < magic.len() {
-                        abi[i] = magic[i] as _;
+                        abi[i] = magic[i] as ::pgrx::ffi::c_char;
                         i += 1;
                     }
                     abi

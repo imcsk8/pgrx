@@ -7,10 +7,10 @@
 //LICENSE All rights reserved.
 //LICENSE
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
-use crate::{
-    direct_function_call, pg_sys, AnyNumeric, Date, Interval, IntoDatum, Time, TimeWithTimeZone,
-    Timestamp, TimestampWithTimeZone,
+use crate::datum::{
+    AnyNumeric, Date, Interval, IntoDatum, Time, TimeWithTimeZone, Timestamp, TimestampWithTimeZone,
 };
+use crate::{direct_function_call, pg_sys};
 use core::fmt::{Display, Formatter};
 use core::str::FromStr;
 use pgrx_pg_sys::errcodes::PgSqlErrorCode;
@@ -23,6 +23,9 @@ mod ctor;
 mod ops;
 
 pub use ctor::*;
+
+pub const USECS_PER_SEC: i64 = 1_000_000;
+pub const USECS_PER_DAY: i64 = pg_sys::SECS_PER_DAY as i64 * USECS_PER_SEC;
 
 /// Tags to identify which "part" of a date or time-type value to extract or truncate to
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -195,7 +198,7 @@ pub trait HasExtractableParts: Clone + IntoDatum + seal::DateTimeType {
                 Self::EXTRACT_FUNCTION,
                 &[field_datum, self.clone().into_datum()],
             );
-            #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+            #[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
             let field_value: Option<AnyNumeric> = direct_function_call(
                 Self::EXTRACT_FUNCTION,
                 &[field_datum, self.clone().into_datum()],
@@ -226,7 +229,13 @@ pub trait ToIsoString: IntoDatum + Sized + Display + seal::DateTimeType {
                     self.into_datum().unwrap(),
                     Self::type_oid(),
                 );
-                #[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16"))]
+                #[cfg(any(
+                    feature = "pg13",
+                    feature = "pg14",
+                    feature = "pg15",
+                    feature = "pg16",
+                    feature = "pg17"
+                ))]
                 let jsonb = pg_sys::JsonEncodeDateTime(
                     std::ptr::null_mut(),
                     self.into_datum().unwrap(),
@@ -248,7 +257,13 @@ pub trait ToIsoString: IntoDatum + Sized + Display + seal::DateTimeType {
     /// # Notes
     ///
     /// This function is only available on Postgres v13 and greater
-    #[cfg(any(feature = "pg13", feature = "pg14", feature = "pg15", feature = "pg16"))]
+    #[cfg(any(
+        feature = "pg13",
+        feature = "pg14",
+        feature = "pg15",
+        feature = "pg16",
+        feature = "pg17"
+    ))]
     fn to_iso_string_with_timezone<Tz: AsRef<str>>(
         self,
         timezone: Tz,
@@ -413,7 +428,7 @@ mod pg12_13 {
     }
 }
 
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const DATE_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_date;
 impl_wrappers!(
@@ -429,7 +444,7 @@ impl_wrappers!(
 #[cfg(any(feature = "pg12", feature = "pg13"))]
 const TIME_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::time_part;
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const TIME_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_time;
 
@@ -446,7 +461,7 @@ impl_wrappers!(
 #[cfg(any(feature = "pg12", feature = "pg13"))]
 const TIMETZ_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::timetz_part;
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const TIMETZ_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_timetz;
 
@@ -463,7 +478,7 @@ impl_wrappers!(
 #[cfg(any(feature = "pg12", feature = "pg13"))]
 const TIMESTAMP_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::timestamp_part;
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const TIMESTAMP_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_timestamp;
 
@@ -480,7 +495,7 @@ impl_wrappers!(
 #[cfg(any(feature = "pg12", feature = "pg13"))]
 const TIMESTAMPTZ_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::timestamptz_part;
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const TIMESTAMPTZ_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_timestamptz;
 
@@ -497,7 +512,7 @@ impl_wrappers!(
 #[cfg(any(feature = "pg12", feature = "pg13"))]
 const INTERVAL_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::interval_part;
-#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16"))]
+#[cfg(any(feature = "pg14", feature = "pg15", feature = "pg16", feature = "pg17"))]
 const INTERVAL_EXTRACT: unsafe fn(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum =
     pg_sys::extract_interval;
 
@@ -521,7 +536,7 @@ impl_wrappers!(
 ///
 /// Returns a [`DateTimeConversionError`] if the specified timezone is unknown to Postgres
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub fn get_timezone_offset<Tz: AsRef<str>>(zone: Tz) -> Result<i32, DateTimeConversionError> {
     let zone = zone.as_ref();
     PgTryBuilder::new(|| {
@@ -589,7 +604,7 @@ pub fn get_timezone_offset<Tz: AsRef<str>>(zone: Tz) -> Result<i32, DateTimeConv
             {
                 pg_sys::DecodeTimezoneAbbrev(0, lowzone, &mut val, &mut tzp) as u32
             }
-            #[cfg(feature = "pg16")]
+            #[cfg(any(feature = "pg16", feature = "pg17"))]
             {
                 let mut ftype = 0;
                 pg_sys::DecodeTimezoneAbbrev(

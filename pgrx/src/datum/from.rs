@@ -12,7 +12,7 @@
 use crate::{
     pg_sys, varlena, varlena_to_byte_slice, AllocatedByPostgres, IntoDatum, PgBox, PgMemoryContexts,
 };
-use core::ffi::CStr;
+use core::{ffi::CStr, mem::size_of};
 use std::num::NonZeroUsize;
 
 /// If converting a Datum to a Rust type fails, this is the set of possible reasons why.
@@ -39,7 +39,7 @@ pub enum TryFromDatumError {
 ///
 /// If implementing this, also implement `IntoDatum` for the reverse
 /// conversion.
-pub trait FromDatum {
+pub trait FromDatum: Sized {
     /// Should a type OID be fetched when calling `from_datum`?
     const GET_TYPOID: bool = false;
 
@@ -54,10 +54,7 @@ pub trait FromDatum {
     ///
     /// If, however, you're providing an arbitrary datum value, it needs to be considered unsafe
     /// and that unsafeness should be propagated through your API.
-    unsafe fn from_datum(datum: pg_sys::Datum, is_null: bool) -> Option<Self>
-    where
-        Self: Sized,
-    {
+    unsafe fn from_datum(datum: pg_sys::Datum, is_null: bool) -> Option<Self> {
         FromDatum::from_polymorphic_datum(datum, is_null, pg_sys::InvalidOid)
     }
 
@@ -71,9 +68,7 @@ pub trait FromDatum {
         datum: pg_sys::Datum,
         is_null: bool,
         typoid: pg_sys::Oid,
-    ) -> Option<Self>
-    where
-        Self: Sized;
+    ) -> Option<Self>;
 
     /// Default implementation switched to the specified memory context and then simply calls
     /// `FromDatum::from_datum(...)` from within that context.
@@ -93,10 +88,7 @@ pub trait FromDatum {
         datum: pg_sys::Datum,
         is_null: bool,
         typoid: pg_sys::Oid,
-    ) -> Option<Self>
-    where
-        Self: Sized,
-    {
+    ) -> Option<Self> {
         memory_context.switch_to(|_| FromDatum::from_polymorphic_datum(datum, is_null, typoid))
     }
 
@@ -114,7 +106,7 @@ pub trait FromDatum {
         type_oid: pg_sys::Oid,
     ) -> Result<Option<Self>, TryFromDatumError>
     where
-        Self: Sized + IntoDatum,
+        Self: IntoDatum,
     {
         if !is_binary_coercible::<Self>(type_oid) {
             Err(TryFromDatumError::IncompatibleTypes {
@@ -137,7 +129,7 @@ pub trait FromDatum {
         type_oid: pg_sys::Oid,
     ) -> Result<Option<Self>, TryFromDatumError>
     where
-        Self: Sized + IntoDatum,
+        Self: IntoDatum,
     {
         if !is_binary_coercible::<Self>(type_oid) {
             Err(TryFromDatumError::IncompatibleTypes {
@@ -291,7 +283,12 @@ impl FromDatum for i64 {
         if is_null {
             None
         } else {
-            Some(datum.value() as _)
+            let value = if size_of::<i64>() <= size_of::<pg_sys::Datum>() {
+                datum.value() as _
+            } else {
+                *(datum.cast_mut_ptr() as *const _)
+            };
+            Some(value)
         }
     }
 }
@@ -323,7 +320,12 @@ impl FromDatum for f64 {
         if is_null {
             None
         } else {
-            Some(f64::from_bits(datum.value() as _))
+            let value = if size_of::<i64>() <= size_of::<pg_sys::Datum>() {
+                f64::from_bits(datum.value() as _)
+            } else {
+                *(datum.cast_mut_ptr() as *const _)
+            };
+            Some(value)
         }
     }
 }
@@ -409,23 +411,27 @@ impl FromDatum for String {
     #[inline]
     unsafe fn from_polymorphic_datum(
         datum: pg_sys::Datum,
-        _is_null: bool,
+        is_null: bool,
         _typoid: pg_sys::Oid,
     ) -> Option<String> {
-        let varlena = pg_sys::pg_detoast_datum_packed(datum.cast_mut_ptr());
-        let converted_varlena = convert_varlena_to_str_memoized(varlena);
-        let ret_string = converted_varlena.to_owned();
+        if is_null || datum.is_null() {
+            return None;
+        } else {
+            let varlena = pg_sys::pg_detoast_datum_packed(datum.cast_mut_ptr());
+            let converted_varlena = convert_varlena_to_str_memoized(varlena);
+            let ret_string = converted_varlena.to_owned();
 
-        // If the datum is EXTERNAL or COMPRESSED, then detoasting creates a pfree-able chunk
-        // that needs to be freed. We can free it because `to_owned` above creates a Rust copy
-        // of the string.
-        if varlena::varatt_is_1b_e(datum.cast_mut_ptr())
-            || varlena::varatt_is_4b_c(datum.cast_mut_ptr())
-        {
-            pg_sys::pfree(varlena.cast());
+            // If the datum is EXTERNAL or COMPRESSED, then detoasting creates a pfree-able chunk
+            // that needs to be freed. We can free it because `to_owned` above creates a Rust copy
+            // of the string.
+            if varlena::varatt_is_1b_e(datum.cast_mut_ptr())
+                || varlena::varatt_is_4b_c(datum.cast_mut_ptr())
+            {
+                pg_sys::pfree(varlena.cast());
+            }
+
+            Some(ret_string)
         }
-
-        Some(ret_string)
     }
 }
 

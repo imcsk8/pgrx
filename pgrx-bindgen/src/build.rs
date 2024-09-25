@@ -11,7 +11,7 @@ use bindgen::callbacks::{DeriveTrait, EnumVariantValue, ImplementsTrait, MacroPa
 use bindgen::NonCopyUnionStyle;
 use eyre::{eyre, WrapErr};
 use pgrx_pg_config::{
-    is_supported_major_version, prefix_path, PgConfig, PgConfigSelector, Pgrx, SUPPORTED_VERSIONS,
+    is_supported_major_version, PgConfig, PgConfigSelector, Pgrx, SUPPORTED_VERSIONS,
 };
 use quote::{quote, ToTokens};
 use std::cell::RefCell;
@@ -26,10 +26,8 @@ use syn::{ForeignItem, Item, ItemConst};
 
 const BLOCKLISTED_TYPES: [&str; 3] = ["Datum", "NullableDatum", "Oid"];
 
-mod build {
-    pub(super) mod clang;
-    pub(super) mod sym_blocklist;
-}
+pub(super) mod clang;
+pub(super) mod sym_blocklist;
 
 #[derive(Debug)]
 struct BindingOverride {
@@ -138,7 +136,7 @@ impl bindgen::callbacks::ParseCallbacks for BindingOverride {
     }
 }
 
-fn main() -> eyre::Result<()> {
+pub fn main() -> eyre::Result<()> {
     if env_tracked("DOCS_RS").as_deref() == Some("1") {
         return Ok(());
     }
@@ -232,7 +230,13 @@ fn main() -> eyre::Result<()> {
             .iter()
             .map(|(pg_major_ver, pg_config)| {
                 scope.spawn(|| {
-                    generate_bindings(*pg_major_ver, pg_config, &build_paths, is_for_release)
+                    generate_bindings(
+                        *pg_major_ver,
+                        pg_config,
+                        &build_paths,
+                        is_for_release,
+                        compile_cshim,
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -280,7 +284,7 @@ fn emit_rerun_if_changed() {
     println!("cargo:rerun-if-env-changed=PGRX_PG_SYS_GENERATE_BINDINGS_FOR_RELEASE");
 
     println!("cargo:rerun-if-changed=include");
-    println!("cargo:rerun-if-changed=cshim");
+    println!("cargo:rerun-if-changed=pgrx-cshim.c");
 
     if let Ok(pgrx_config) = Pgrx::config_toml() {
         println!("cargo:rerun-if-changed={}", pgrx_config.display());
@@ -292,12 +296,13 @@ fn generate_bindings(
     pg_config: &PgConfig,
     build_paths: &BuildPaths,
     is_for_release: bool,
+    enable_cshim: bool,
 ) -> eyre::Result<()> {
     let mut include_h = build_paths.manifest_dir.clone();
     include_h.push("include");
     include_h.push(format!("pg{major_version}.h"));
 
-    let bindgen_output = get_bindings(major_version, pg_config, &include_h)
+    let bindgen_output = get_bindings(major_version, pg_config, &include_h, enable_cshim)
         .wrap_err_with(|| format!("bindgen failed for pg{major_version}"))?;
 
     let oids = extract_oids(&bindgen_output);
@@ -351,9 +356,9 @@ struct BuildPaths {
     out_dir: PathBuf,
     /// {manifest_dir}/src
     src_dir: PathBuf,
-    /// {manifest_dir}/cshim
+    /// {manifest_dir}/pgrx-cshim.c
     shim_src: PathBuf,
-    /// {out_dir}/cshim
+    /// {out_dir}/pgrx-cshim.c
     shim_dst: PathBuf,
 }
 
@@ -364,8 +369,8 @@ impl BuildPaths {
         let out_dir = env_tracked("OUT_DIR").map(PathBuf::from).unwrap();
         Self {
             src_dir: manifest_dir.join("src/include"),
-            shim_src: manifest_dir.join("cshim"),
-            shim_dst: out_dir.join("cshim"),
+            shim_src: manifest_dir.join("pgrx-cshim.c"),
+            shim_dst: out_dir.join("pgrx-cshim.c"),
             out_dir,
             manifest_dir,
         }
@@ -671,7 +676,7 @@ impl<'a> From<&'a [syn::Item]> for StructGraph<'a> {
 
 impl<'a> StructDescriptor<'a> {
     /// children returns an iterator over the children of this node in the graph
-    fn children(&'a self, graph: &'a StructGraph) -> StructDescriptorChildren {
+    fn children(&'a self, graph: &'a StructGraph) -> StructDescriptorChildren<'a> {
         StructDescriptorChildren { offset: 0, descriptor: self, graph }
     }
 }
@@ -728,6 +733,7 @@ fn get_bindings(
     major_version: u16,
     pg_config: &PgConfig,
     include_h: &path::Path,
+    enable_cshim: bool,
 ) -> eyre::Result<syn::File> {
     let bindings = if let Some(info_dir) =
         target_env_tracked(&format!("PGRX_TARGET_INFO_PATH_PG{major_version}"))
@@ -736,7 +742,7 @@ fn get_bindings(
         std::fs::read_to_string(&bindings_file)
             .wrap_err_with(|| format!("failed to read raw bindings from {bindings_file}"))?
     } else {
-        let bindings = run_bindgen(major_version, pg_config, include_h)?;
+        let bindings = run_bindgen(major_version, pg_config, include_h, enable_cshim)?;
         if let Some(path) = env_tracked("PGRX_PG_SYS_EXTRA_OUTPUT_PATH") {
             std::fs::write(path, &bindings)?;
         }
@@ -751,12 +757,13 @@ fn run_bindgen(
     major_version: u16,
     pg_config: &PgConfig,
     include_h: &path::Path,
+    enable_cshim: bool,
 ) -> eyre::Result<String> {
     eprintln!("Generating bindings for pg{major_version}");
     let configure = pg_config.configure()?;
     let preferred_clang: Option<&std::path::Path> = configure.get("CLANG").map(|s| s.as_ref());
     eprintln!("pg_config --configure CLANG = {preferred_clang:?}");
-    let (autodetect, includes) = build::clang::detect_include_paths_for(preferred_clang);
+    let (autodetect, includes) = clang::detect_include_paths_for(preferred_clang);
     let mut binder = bindgen::Builder::default();
     binder = add_blocklists(binder);
     binder = add_derives(binder);
@@ -766,6 +773,7 @@ fn run_bindgen(
     };
     let enum_names = Rc::new(RefCell::new(BTreeMap::new()));
     let overrides = BindingOverride::new_from(Rc::clone(&enum_names));
+    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let bindings = binder
         .header(include_h.display().to_string())
         .clang_args(extra_bindgen_clang_args(pg_config)?)
@@ -777,9 +785,15 @@ fn run_bindgen(
         .rustified_non_exhaustive_enum("NodeTag")
         .size_t_is_usize(true)
         .merge_extern_blocks(true)
+        .wrap_unsafe_ops(true)
+        .use_core()
+        .generate_cstr(true)
+        .disable_nested_struct_naming()
         .formatter(bindgen::Formatter::None)
         .layout_tests(false)
         .default_non_copy_union_style(NonCopyUnionStyle::ManuallyDrop)
+        .wrap_static_fns(enable_cshim)
+        .wrap_static_fns_path(out_path.join("pgrx-cshim-static"))
         .generate()
         .wrap_err_with(|| format!("Unable to generate bindings for pg{major_version}"))?;
     let mut binding_str = bindings.to_string();
@@ -821,9 +835,9 @@ fn add_blocklists(bind: bindgen::Builder) -> bindgen::Builder {
         .blocklist_function(".*(?:set|long)jmp")
         .blocklist_function("pg_re_throw")
         .blocklist_function("err(start|code|msg|detail|context_msg|hint|finish)")
-        .blocklist_item("CONFIGURE_ARGS") // configuration during build is hopefully irrelevant
-        .blocklist_item("_*(?:HAVE|have)_.*") // header tracking metadata
-        .blocklist_item("_[A-Z_]+_H") // more header metadata
+        .blocklist_var("CONFIGURE_ARGS") // configuration during build is hopefully irrelevant
+        .blocklist_var("_*(?:HAVE|have)_.*") // header tracking metadata
+        .blocklist_var("_[A-Z_]+_H") // more header metadata
         .blocklist_item("__[A-Z].*") // these are reserved and unused by Postgres
         .blocklist_item("__darwin.*") // this should always be Apple's names
         .blocklist_function("pq(?:Strerror|Get.*)") // wrappers around platform functions: user can call those themselves
@@ -838,6 +852,31 @@ fn add_blocklists(bind: bindgen::Builder) -> bindgen::Builder {
         .blocklist_function("(?:sigstack|sigreturn|siggetmask|gets|vfork|te?mpnam(?:_r)?|mktemp)")
         // Missing on some systems, despite being in their headers.
         .blocklist_function("inet_net_pton.*")
+        // To make it work without `cshim`
+        .blocklist_function("heap_getattr")
+        .blocklist_function("BufferGetBlock")
+        .blocklist_function("BufferGetPage")
+        .blocklist_function("BufferIsLocal")
+        .blocklist_function("GetMemoryChunkContext")
+        .blocklist_function("GETSTRUCT")
+        .blocklist_function("MAXALIGN")
+        .blocklist_function("MemoryContextIsValid")
+        .blocklist_function("MemoryContextSwitchTo")
+        .blocklist_function("TYPEALIGN")
+        .blocklist_function("TransactionIdIsNormal")
+        .blocklist_function("expression_tree_walker")
+        .blocklist_function("get_pg_major_minor_version_string")
+        .blocklist_function("get_pg_major_version_num")
+        .blocklist_function("get_pg_major_version_string")
+        .blocklist_function("get_pg_version_string")
+        .blocklist_function("heap_tuple_get_struct")
+        .blocklist_function("planstate_tree_walker")
+        .blocklist_function("query_or_expression_tree_walker")
+        .blocklist_function("query_tree_walker")
+        .blocklist_function("range_table_entry_walker")
+        .blocklist_function("range_table_walker")
+        .blocklist_function("raw_expression_tree_walker")
+        .blocklist_function("type_is_array")
 }
 
 fn add_derives(bind: bindgen::Builder) -> bindgen::Builder {
@@ -910,60 +949,17 @@ fn build_shim(
 ) -> eyre::Result<()> {
     let major_version = pg_config.major_version()?;
 
-    // then build the shim for the version feature currently being built
-    build_shim_for_version(shim_src, shim_dst, pg_config)?;
+    std::fs::copy(shim_src, shim_dst).unwrap();
 
-    // no matter what, tell rustc to link to the library that was built for the feature we're currently building
-    let envvar_name = format!("CARGO_FEATURE_PG{major_version}");
-    if env_tracked(&envvar_name).is_some() {
-        println!("cargo:rustc-link-search={}", shim_dst.display());
-        println!("cargo:rustc-link-lib=static=pgrx-cshim-{major_version}");
+    let mut build = cc::Build::new();
+    if let Some(flag) = pg_target_include_flags(major_version, pg_config)? {
+        build.flag(&flag);
     }
-
-    Ok(())
-}
-
-fn build_shim_for_version(
-    shim_src: &path::Path,
-    shim_dst: &path::Path,
-    pg_config: &PgConfig,
-) -> eyre::Result<()> {
-    let path_env = prefix_path(pg_config.parent_path());
-    let major_version = pg_config.major_version()?;
-
-    eprintln!("PATH for build_shim={path_env}");
-    eprintln!("shim_src={}", shim_src.display());
-    eprintln!("shim_dst={}", shim_dst.display());
-
-    fs::create_dir_all(shim_dst).unwrap();
-
-    let makefile_dst = path::Path::join(shim_dst, "./Makefile");
-    if !makefile_dst.try_exists()? {
-        fs::copy(path::Path::join(shim_src, "./Makefile"), makefile_dst).unwrap();
+    for flag in extra_bindgen_clang_args(pg_config)? {
+        build.flag(&flag);
     }
-
-    let cshim_dst = path::Path::join(shim_dst, "./pgrx-cshim.c");
-    if !cshim_dst.try_exists()? {
-        fs::copy(path::Path::join(shim_src, "./pgrx-cshim.c"), cshim_dst).unwrap();
-    }
-
-    let make = env_tracked("MAKE").unwrap_or_else(|| "make".to_string());
-    let rc = run_command(
-        Command::new(make)
-            .arg("clean")
-            .arg(&format!("libpgrx-cshim-{major_version}.a"))
-            .env("PG_TARGET_VERSION", format!("{major_version}"))
-            .env("PATH", path_env)
-            .env_remove("TARGET")
-            .env_remove("HOST")
-            .current_dir(shim_dst),
-        &format!("shim for PG v{major_version}"),
-    )?;
-
-    if rc.status.code().unwrap() != 0 {
-        return Err(eyre!("failed to make pgrx-cshim for v{major_version}"));
-    }
-
+    build.file(shim_dst);
+    build.compile("pgrx-cshim");
     Ok(())
 }
 
@@ -1110,7 +1106,7 @@ fn is_blocklisted_item(item: &ForeignItem) -> bool {
         _ => return false,
     };
     BLOCKLISTED
-        .get_or_init(|| build::sym_blocklist::SYMBOLS.iter().copied().collect::<BTreeSet<&str>>())
+        .get_or_init(|| sym_blocklist::SYMBOLS.iter().copied().collect::<BTreeSet<&str>>())
         .contains(sym_name.to_string().as_str())
 }
 

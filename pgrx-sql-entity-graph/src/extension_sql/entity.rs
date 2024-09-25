@@ -12,7 +12,7 @@
 `pgrx::extension_sql!()` related entities for Rust to SQL translation
 
 > Like all of the [`sql_entity_graph`][crate] APIs, this is considered **internal**
-to the `pgrx` framework and very subject to change between versions. While you may use this, please do it with caution.
+> to the `pgrx` framework and very subject to change between versions. While you may use this, please do it with caution.
 
 
 */
@@ -134,13 +134,13 @@ impl Display for SqlDeclaredEntity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SqlDeclaredEntity::Type(data) => {
-                f.write_str(&(String::from("Type(") + &data.name + ")"))
+                write!(f, "Type({})", data.name)
             }
             SqlDeclaredEntity::Enum(data) => {
-                f.write_str(&(String::from("Enum(") + &data.name + ")"))
+                write!(f, "Enum({})", data.name)
             }
             SqlDeclaredEntity::Function(data) => {
-                f.write_str(&(String::from("Function ") + &data.name + ")"))
+                write!(f, "Function({})", data.name)
             }
         }
     }
