@@ -60,7 +60,7 @@ pub trait TypmodInOutFuncs {
     /// Given a string representation of `Self`, parse it into `Self`.
     ///
     /// It is expected that malformed input will raise an `error!()` or `panic!()`
-    fn input(input: &core::ffi::CStr, oid: i32, typmod: i32) -> Self
+    fn input(input: &core::ffi::CStr, oid: pg_sys::Oid, typmod: i32) -> Self
     where
         Self: Sized;
 
